@@ -74,12 +74,8 @@ def build_rl_h100_test_list() -> list[OverrideDefinitions]:
             [
                 [
                     "--module rl",
-<<<<<<< HEAD
-                    "--config rl_grpo_qwen3_0_6b_batch_invariant",
-                    "--metrics.no-enable-wandb",
-=======
                     "--config rl_grpo_qwen3_debug_batch_invariant",
->>>>>>> fb75d98e1 (Move RL batch-invariant tests to A10G with debug model)
+                    "--metrics.no-enable-wandb",
                 ],
             ],
             "RL GRPO debug batch-invariant + deterministic",
