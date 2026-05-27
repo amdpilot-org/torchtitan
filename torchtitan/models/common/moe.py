@@ -12,6 +12,7 @@ import torch.nn.functional as F
 from torch import nn
 from torch.distributed.tensor import DTensor
 
+from torchtitan.distributed.spmd_state import set_current_mesh
 from torchtitan.models.common.feed_forward import FeedForward
 from torchtitan.models.common.linear import Linear
 from torchtitan.protocols.module import Module
@@ -82,27 +83,22 @@ class GroupedExperts(Module):
     ) -> torch.Tensor:
         """Dispatch tokens to experts, compute, combine, and scatter_add.
 
-        When parallelized, ``local_map`` (from ``sharding_config``) handles
-        DTensor→local conversion on entry and local→DTensor(Partial) wrapping
-        on exit. The forward body operates on plain local tensors.
+        The outer MoE sharding config makes this a local tensor region.
         """
         routed_input, num_tokens_local, metadata = self.token_dispatcher.dispatch(
             x, top_scores, selected_experts_indices
         )
-        routed_output = self._experts_forward(routed_input, num_tokens_local)
+        with set_current_mesh(self.token_dispatcher.sparse_mesh):
+            routed_output = self._experts_forward(routed_input, num_tokens_local)
         return self.token_dispatcher.combine(routed_output, metadata, x)
 
     def parallelize(self, parallel_dims) -> None:
-        """Parallelize expert weights, then wire EP/TP meshes on the dispatcher
-        so dispatch/combine see the right meshes at runtime."""
+        """Parallelize expert weights, then install the sparse runtime mesh."""
         super().parallelize(parallel_dims)
-        # TODO(@pianpwk): With spmd_types and set_current_mesh, replace wire_meshes
-        # with current_mesh calls inside AllToAllTokenDispatcher and
-        # DeepEPTokenDispatcher.
-        self.token_dispatcher.wire_meshes(
-            ep_mesh=parallel_dims.get_optional_mesh("ep"),
-            tp_mesh=parallel_dims.get_optional_mesh("tp"),
-        )
+        if parallel_dims.ep_enabled:
+            self.token_dispatcher.sparse_mesh = parallel_dims.get_activated_mesh(
+                ["dp_replicate", "efsdp", "ep"]
+            )
 
 
 class TokenChoiceTopKRouter(Module):
