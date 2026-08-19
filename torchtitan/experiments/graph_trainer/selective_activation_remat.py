@@ -19,6 +19,7 @@ from torch._functorch.partitioners import (
 )
 
 from torchtitan.experiments.graph_trainer.common_utils import (
+    _get_graph_modules,
     _get_module_fqn,
     _is_backward_node,
 )
@@ -98,10 +99,7 @@ def _collect_backward_regions(
     return regions
 
 
-def selective_activation_remat_pass(
-    gm: fx.GraphModule,
-    example_inputs: Any = None,
-) -> fx.GraphModule:
+def _selective_activation_remat(gm: fx.GraphModule) -> fx.GraphModule:
     """In-place remat: insert recompute duplicates before backward consumers.
 
     For each ``must_recompute`` forward node consumed by a backward node, a
@@ -404,4 +402,25 @@ def selective_activation_remat_pass(
     gm = raise_getitems(gm)
 
     gm.recompile()
+    return gm
+
+
+def selective_activation_remat_pass(
+    gm: fx.GraphModule,
+    example_inputs: Any = None,
+    *,
+    recurse: bool = False,
+    apply_to_root: bool = True,
+) -> fx.GraphModule:
+    """Materialize tagged recompute nodes in the root and/or nested graphs.
+
+    Args:
+        recurse: If ``True``, apply the pass to all nested FX ``GraphModule``
+            submodules. The root graph is controlled separately by
+            ``apply_to_root``.
+    """
+    for module in _get_graph_modules(gm, recurse=recurse, apply_to_root=apply_to_root):
+        updated = _selective_activation_remat(module)
+        if updated is not module:
+            raise AssertionError("rematerialization must update graphs in place")
     return gm
