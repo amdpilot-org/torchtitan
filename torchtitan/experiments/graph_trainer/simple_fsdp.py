@@ -247,7 +247,11 @@ class ReplicateComputation(Module):
             return x
 
         output = self.replicate_compute(x)
-        return output
+        source = x._local_tensor
+        build_compute_weight = getattr(source, "build_compute_weight", None)
+        if build_compute_weight is None:
+            return output
+        return build_compute_weight(output)
 
 
 def data_parallel(

@@ -29,6 +29,16 @@ _DENSE_STORAGE_AXES = ["dp_replicate", "dp_shard", "cp", "tp"]
 _SPARSE_STORAGE_AXES = ["dp_replicate", "efsdp", "ep"]
 
 
+def _configure_fsdp_modules(modules: nn.Module | list[nn.Module]) -> None:
+    """Configure parameters whose compute layout follows an FSDP lifetime."""
+    roots = modules if isinstance(modules, list) else [modules]
+    for root in roots:
+        for module in root.modules():
+            configure_fsdp = getattr(module, "configure_fsdp", None)
+            if configure_fsdp is not None:
+                configure_fsdp()
+
+
 def resolve_fsdp_mesh(
     parallel_dims: ParallelDims,
 ) -> tuple[DeviceMesh, DataParallelMeshDims | None]:
@@ -156,6 +166,7 @@ def apply_fsdp_to_vision_encoder(
     reshard_after_forward = get_fsdp_reshard_after_forward_policy(
         reshard_after_forward_policy, pp_enabled=pp_enabled
     )
+    _configure_fsdp_modules(vision_encoder)
     fully_shard(
         vision_encoder,
         mesh=dp_mesh,
@@ -234,6 +245,7 @@ def apply_fsdp_to_decoder(
     reshard_after_forward = get_fsdp_reshard_after_forward_policy(
         reshard_after_forward_policy, pp_enabled
     )
+    _configure_fsdp_modules(model)
 
     if model.enable_weight_tying:
         # When weights are tied, tok_embeddings and output share the same parameter.

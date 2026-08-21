@@ -27,6 +27,7 @@ from torchtitan.distributed import ParallelDims
 from torchtitan.distributed.activation_checkpoint import ActivationCheckpointingConfig
 from torchtitan.distributed.compile import apply_compile
 from torchtitan.distributed.fsdp import (
+    _configure_fsdp_modules,
     disable_fsdp_gradient_division,
     enable_fsdp_symm_mem,
     get_fsdp_reshard_after_forward_policy,
@@ -266,6 +267,7 @@ def apply_fsdp(
     reshard_after_forward = get_fsdp_reshard_after_forward_policy(
         reshard_after_forward_policy, pp_enabled
     )
+    _configure_fsdp_modules(model)
 
     # When input/output embeddings are tied (e.g. Qwen3), tok_embeddings and
     # lm_head share one parameter. FSDP2 forbids a parameter being managed by

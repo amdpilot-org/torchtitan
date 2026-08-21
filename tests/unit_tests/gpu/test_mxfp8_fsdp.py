@@ -21,12 +21,16 @@ pytest.importorskip("torchao.prototype.moe_training.kernels.mxfp8")
 import torchtitan.components.quantization.mxfp8.tensor as mxfp8_tensor  # noqa: E402
 from torchtitan.components.quantization.mxfp8.linear import MXFP8Linear  # noqa: E402
 from torchtitan.components.quantization.mxfp8.tensor import (  # noqa: E402
-    MXFP8FSDPComputeWeight,
-    MXFP8FSDPWeight,
+    _MXFP8LinearFSDPWeight,
 )
 from torchtitan.distributed.cudagraph import (  # noqa: E402
     cudagraph_teardown,
     CUDAGraphWrapper,
+)
+from torchtitan.distributed.fsdp import _configure_fsdp_modules  # noqa: E402
+from torchtitan.experiments.graph_trainer.simple_fsdp import (  # noqa: E402
+    data_parallel,
+    MixedPrecisionPolicy as SimpleFSDPMixedPrecisionPolicy,
 )
 
 
@@ -69,6 +73,7 @@ def _run_reshard_after_forward(
             .bfloat16()
         )
         linear.compile()
+        _configure_fsdp_modules(linear)
         fully_shard(
             linear,
             mesh=mesh,
@@ -78,7 +83,7 @@ def _run_reshard_after_forward(
             ),
             reshard_after_forward=True,
         )
-        assert isinstance(linear.weight.to_local(), MXFP8FSDPWeight)
+        assert isinstance(linear.weight.to_local(), _MXFP8LinearFSDPWeight)
 
         input_MK = torch.randn(
             64,
@@ -90,7 +95,7 @@ def _run_reshard_after_forward(
         output_MN = linear(input_MK)
         weight_param = _get_weight_param(linear)
         inner_tensor_ids = tuple(map(id, weight_param._unsharded_inner_tensors))
-        assert isinstance(linear.weight.to_local(), MXFP8FSDPWeight)
+        assert isinstance(linear.weight.to_local(), _MXFP8LinearFSDPWeight)
         assert all(
             tensor.untyped_storage().size() == 0
             for tensor in weight_param.all_gather_outputs
@@ -101,7 +106,7 @@ def _run_reshard_after_forward(
         )
 
         output_MN.sum().backward()
-        assert isinstance(linear.weight.to_local(), MXFP8FSDPWeight)
+        assert isinstance(linear.weight.to_local(), _MXFP8LinearFSDPWeight)
         assert tuple(map(id, weight_param._unsharded_inner_tensors)) == inner_tensor_ids
         assert all(
             tensor.untyped_storage().size() == 0
@@ -131,7 +136,7 @@ def _run_pp_cache_lifecycle(
     os.environ["MASTER_PORT"] = str(port)
     torch.cuda.set_device(rank)
     dist.init_process_group("nccl", rank=rank, world_size=world_size)
-    original_quantize_weight = mxfp8_tensor.quantize_mxfp8_weight
+    original_quantize_weight = mxfp8_tensor._quantize_mxfp8_weight
     num_quantize_calls = 0
 
     def counted_quantize_weight(weight_NK: torch.Tensor):
@@ -139,7 +144,7 @@ def _run_pp_cache_lifecycle(
         num_quantize_calls += 1
         return original_quantize_weight(weight_NK)
 
-    mxfp8_tensor.quantize_mxfp8_weight = counted_quantize_weight
+    mxfp8_tensor._quantize_mxfp8_weight = counted_quantize_weight
     try:
         mesh = init_device_mesh("cuda", (world_size,), mesh_dim_names=("dp_shard",))
         linear = (
@@ -152,6 +157,7 @@ def _run_pp_cache_lifecycle(
             .cuda()
             .bfloat16()
         )
+        _configure_fsdp_modules(linear)
         fully_shard(
             linear,
             mesh=mesh,
@@ -178,11 +184,14 @@ def _run_pp_cache_lifecycle(
         outputs = [linear(input_MK) for input_MK in inputs]
         assert num_quantize_calls == 1
         weight_param = _get_weight_param(linear)
-        assert isinstance(linear.weight, MXFP8FSDPComputeWeight)
+        assert isinstance(linear.weight, _MXFP8LinearFSDPWeight)
+        assert linear.weight.compute_representation is not None
         assert len(weight_param._unsharded_inner_tensors) == 3
+        operands = linear.weight.compute_representation
+        assert operands is not None
         assert (
-            linear.weight.q_weight_dgrad_NK.data_ptr()
-            == linear.weight.q_weight_fprop_KN.data_ptr()
+            operands.q_weight_dgrad_NK.data_ptr()
+            == operands.q_weight_fprop_KN.data_ptr()
         )
         inner_tensor_ids = tuple(map(id, weight_param._unsharded_inner_tensors))
         assert all(
@@ -196,7 +205,8 @@ def _run_pp_cache_lifecycle(
 
         outputs[0].sum().backward()
         assert num_quantize_calls == 1
-        assert isinstance(linear.weight, MXFP8FSDPComputeWeight)
+        assert isinstance(linear.weight, _MXFP8LinearFSDPWeight)
+        assert linear.weight.compute_representation is not None
         assert all(
             tensor.untyped_storage().size() == 0
             for tensor in weight_param.all_gather_outputs
@@ -211,7 +221,7 @@ def _run_pp_cache_lifecycle(
         linear.set_requires_gradient_sync(True)
         outputs[1].sum().backward()
         assert num_quantize_calls == 1
-        assert isinstance(linear.weight.to_local(), MXFP8FSDPWeight)
+        assert isinstance(linear.weight.to_local(), _MXFP8LinearFSDPWeight)
         assert all(
             tensor.untyped_storage().size() == 0
             for tensor in weight_param.all_gather_outputs
@@ -223,7 +233,8 @@ def _run_pp_cache_lifecycle(
 
         output_MN = linear(inputs[0].detach())
         assert num_quantize_calls == 2
-        assert isinstance(linear.weight, MXFP8FSDPComputeWeight)
+        assert isinstance(linear.weight, _MXFP8LinearFSDPWeight)
+        assert linear.weight.compute_representation is not None
         assert tuple(map(id, weight_param._unsharded_inner_tensors)) == inner_tensor_ids
         assert all(
             tensor.untyped_storage().size() == 0
@@ -235,7 +246,7 @@ def _run_pp_cache_lifecycle(
         )
         output_MN.sum().backward()
     finally:
-        mxfp8_tensor.quantize_mxfp8_weight = original_quantize_weight
+        mxfp8_tensor._quantize_mxfp8_weight = original_quantize_weight
         dist.destroy_process_group()
 
 
@@ -254,7 +265,7 @@ def _run_cuda_graph_cache_lifecycle(
     os.environ["MASTER_PORT"] = str(port)
     torch.cuda.set_device(rank)
     dist.init_process_group("nccl", rank=rank, world_size=world_size)
-    original_quantize_weight = mxfp8_tensor.quantize_mxfp8_weight
+    original_quantize_weight = mxfp8_tensor._quantize_mxfp8_weight
     num_quantize_calls = 0
 
     def counted_quantize_weight(weight_NK: torch.Tensor):
@@ -262,7 +273,7 @@ def _run_cuda_graph_cache_lifecycle(
         num_quantize_calls += 1
         return original_quantize_weight(weight_NK)
 
-    mxfp8_tensor.quantize_mxfp8_weight = counted_quantize_weight
+    mxfp8_tensor._quantize_mxfp8_weight = counted_quantize_weight
     try:
         mesh = init_device_mesh("cuda", (world_size,), mesh_dim_names=("dp_shard",))
         linear = (
@@ -275,6 +286,7 @@ def _run_cuda_graph_cache_lifecycle(
             .cuda()
             .bfloat16()
         )
+        _configure_fsdp_modules(linear)
         fully_shard(
             linear,
             mesh=mesh,
@@ -358,8 +370,71 @@ def _run_cuda_graph_cache_lifecycle(
             for tensor in weight_param._unsharded_inner_tensors
         )
     finally:
-        mxfp8_tensor.quantize_mxfp8_weight = original_quantize_weight
+        mxfp8_tensor._quantize_mxfp8_weight = original_quantize_weight
         cudagraph_teardown()
+        dist.destroy_process_group()
+
+
+def _run_simple_fsdp(
+    rank: int,
+    world_size: int,
+    port: int,
+) -> None:
+    """Test GraphTrainer SimpleFSDP compute weights and gradient propagation."""
+    os.environ["MASTER_ADDR"] = "localhost"
+    os.environ["MASTER_PORT"] = str(port)
+    torch.cuda.set_device(rank)
+    dist.init_process_group("nccl", rank=rank, world_size=world_size)
+    original_quantize_weight = mxfp8_tensor._quantize_mxfp8_weight
+    num_quantize_calls = 0
+
+    def counted_quantize_weight(weight_NK: torch.Tensor):
+        nonlocal num_quantize_calls
+        num_quantize_calls += 1
+        return original_quantize_weight(weight_NK)
+
+    mxfp8_tensor._quantize_mxfp8_weight = counted_quantize_weight
+    try:
+        mesh = init_device_mesh("cuda", (world_size,), mesh_dim_names=("fsdp",))
+        linear = (
+            MXFP8Linear.Config(
+                in_features=128,
+                out_features=128,
+                bias=False,
+            )
+            .build()
+            .cuda()
+            .bfloat16()
+        )
+        _configure_fsdp_modules(linear)
+        linear = data_parallel(
+            linear,
+            mesh,
+            mode="fully_shard",
+            mp_policy=SimpleFSDPMixedPrecisionPolicy(
+                param_dtype=torch.bfloat16,
+                reduce_dtype=torch.bfloat16,
+            ),
+        )
+        sharded_weight = linear._parameters["weight"]
+        assert isinstance(sharded_weight._local_tensor, _MXFP8LinearFSDPWeight)
+
+        input_MK = torch.randn(
+            64,
+            128,
+            device="cuda",
+            dtype=torch.bfloat16,
+            requires_grad=True,
+        )
+        output_MN = linear(input_MK)
+        output_MN.sum().backward()
+
+        assert output_MN.shape == (64, 128)
+        assert num_quantize_calls == 1
+        assert input_MK.grad is not None
+        assert sharded_weight.grad is not None
+    finally:
+        mxfp8_tensor._quantize_mxfp8_weight = original_quantize_weight
         dist.destroy_process_group()
 
 
@@ -374,11 +449,13 @@ def _run_cuda_graph_cache_lifecycle(
         _run_reshard_after_forward,
         _run_pp_cache_lifecycle,
         _run_cuda_graph_cache_lifecycle,
+        _run_simple_fsdp,
     ],
     ids=[
         "reshard-after-forward",
         "pp-cache",
         "cuda-graph-cache",
+        "simple-fsdp",
     ],
 )
 def test_mxfp8_fsdp_weight_lifecycle(target):

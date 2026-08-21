@@ -29,6 +29,7 @@ from torchtitan.config import (
 from torchtitan.distributed import ParallelDims
 from torchtitan.distributed.activation_checkpoint import ActivationCheckpointingConfig
 from torchtitan.distributed.fsdp import (
+    _configure_fsdp_modules,
     disable_fsdp_gradient_division,
     enable_fsdp_symm_mem,
     resolve_fsdp_mesh,
@@ -106,6 +107,8 @@ def apply_fsdp(
         fsdp_config["dp_mesh_dims"] = dp_mesh_dims
     if cpu_offload:
         fsdp_config["offload_policy"] = CPUOffloadPolicy()
+
+    _configure_fsdp_modules(model)
 
     linear_layers = [
         model.img_in,
@@ -219,6 +222,7 @@ def parallelize_encoders(
     assert isinstance(hf_module, nn.Module)
     if parallel_dims.spmd_backend == "spmd_types":
         annotate_dp_cp_params_as_r(hf_module, parallel_dims)
+    _configure_fsdp_modules(hf_module)
     # pyrefly: ignore [missing-attribute, not-iterable]
     for block in hf_module.encoder.block:
         fully_shard(block, **fsdp_config)
