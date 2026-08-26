@@ -117,6 +117,10 @@ jobs:
           --assert-equal \
           --options='--trainer.parallelism.tensor_parallel_degree 4 --generator.parallelism.tensor_parallel_degree 4 --num_generators 1'
 
+        # CPU-only compatibility checks that require the RL dependency stack.
+        python -m pytest \
+          torchtitan/experiments/rl/tests/test_batch_invariance.py -v
+
         # Bitwise trainer/generator parity tests (batch-invariant). Each TP=2 case
         # runs in a separate torchrun invocation so it gets a fresh process group
         # and vLLM engine.

@@ -11,6 +11,7 @@ batch-invariant mode: a model-config converter that pins FlexAttention kernel
 options, plus two runtime patches (bmm and the v2 logprob kernel).
 """
 
+import importlib
 import logging
 from dataclasses import dataclass
 
@@ -57,6 +58,31 @@ class BatchInvariantFlexConverter(ModelConfigConverter):
 _batch_invariant_bmm_lib: torch.library.Library | None = None
 
 
+def _load_vllm_batch_invariant_bmm():
+    """Load vLLM's batch-invariant bmm across supported module layouts."""
+    module_names = (
+        "vllm.model_executor.determinism.batch_invariant",
+        "vllm.model_executor.layers.batch_invariant",
+    )
+    last_error: ModuleNotFoundError | None = None
+    for module_name in module_names:
+        try:
+            module = importlib.import_module(module_name)
+        except ModuleNotFoundError as error:
+            # Fall back only when the requested module (or one of its parent
+            # packages) is absent. Do not hide missing transitive dependencies.
+            if error.name is None or not (
+                module_name == error.name or module_name.startswith(f"{error.name}.")
+            ):
+                raise
+            last_error = error
+        else:
+            return module.bmm_batch_invariant
+
+    assert last_error is not None
+    raise last_error
+
+
 def patch_bmm_for_batch_invariance() -> None:
     """Override ``aten::bmm`` with vLLM's batch-invariant bmm kernel.
 
@@ -72,7 +98,7 @@ def patch_bmm_for_batch_invariance() -> None:
     global _batch_invariant_bmm_lib
     if _batch_invariant_bmm_lib is not None:
         return
-    from vllm.model_executor.layers.batch_invariant import bmm_batch_invariant
+    bmm_batch_invariant = _load_vllm_batch_invariant_bmm()
 
     _batch_invariant_bmm_lib = torch.library.Library("aten", "IMPL")
     _batch_invariant_bmm_lib.impl("bmm", bmm_batch_invariant, "CUDA")
