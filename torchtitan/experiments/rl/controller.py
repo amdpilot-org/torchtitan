@@ -157,7 +157,7 @@ class AsyncLoopConfig(Configurable.Config):
 
     num_prompts_per_train_step: int = 8
     """Global number of prompt groups, across all DPs, whose surviving rollouts compose
-    one train step (the global_batch_size, in groups)."""
+    one train step. This is independent of the trainer's token batch shape."""
 
     num_samples_per_prompt: int = 8
     """Sibling rollouts sampled per prompt (the GRPO group)."""
@@ -346,25 +346,24 @@ class Controller(Configurable):
                     "(weights are synced from the trainer via TorchStore). "
                     "Set generator.checkpoint.enable=False."
                 )
-            # RL policy inputs are shaped by BatchConfig, not TrainingConfig.
+            if self.trainer.training.num_tokens_per_train_step != -1:
+                warnings.warn(
+                    "trainer.training.num_tokens_per_train_step is ignored by "
+                    "the RL loop; configure async_loop.num_prompts_per_train_step "
+                    "to control optimizer-step boundaries.",
+                    stacklevel=2,
+                )
             if self.trainer.parallelism.enable_sequence_parallel:
                 sp_degree = self.trainer.parallelism.tensor_parallel_degree
-                seq_len = self.async_loop.batcher.batch.seq_len
-                if sp_degree > 1 and seq_len % sp_degree != 0:
+                max_context_length = self.trainer.training.max_context_length
+                if sp_degree > 1 and max_context_length % sp_degree != 0:
                     raise ValueError(
-                        f"RL batcher sequence length ({seq_len}) must be divisible "
+                        "training.max_context_length "
+                        f"({max_context_length}) must be divisible "
                         f"by sequence parallel degree ({sp_degree})."
                     )
 
-            # RL policy inputs are shaped by BatchConfig, so mirror its shape
-            # into the trainer's token-based configuration.
-            batch_config = self.async_loop.batcher.batch
-            self.trainer.training.max_context_length = batch_config.seq_len
-            self.trainer.training.num_tokens_per_microbatch_per_dp_rank = (
-                batch_config.local_batch_size * batch_config.seq_len
-            )
-
-            # TODO: add a check so that all seq_len related variables make sense
+            # TODO: Check that all context-length-related variables are consistent,
             # e.g. rollout max length cannot be larger than the model max_seq_len
             # or the packing len, etc.
 
@@ -804,6 +803,7 @@ class Controller(Configurable):
 
         # batcher
         batcher = async_loop.batcher.build(
+            training=self.config.trainer.training,
             num_prompts_per_train_step=async_loop.num_prompts_per_train_step,
             dp_degree=self.trainer_dp_degree,
             pad_id=self.renderer._tokenizer.eos_token_id,
